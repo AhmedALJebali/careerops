@@ -96,7 +96,7 @@ import {
 import {
   buildTriageRoleRow, buildMatchReportRow, splitGapsByMaterials, validateTriageAdd, inferRoleLevel,
 } from './board.mjs'
-import { byId, escapeHtml, commaList } from './primitives.mjs'
+import { byId, escapeHtml, commaList, createFocusTrap } from './primitives.mjs'
 import {
   createOpenaiPrefsStore,
   providerSecretOnFile,
@@ -116,6 +116,46 @@ const $ = byId
 const esc = escapeHtml
 const list = commaList
 let SELF_HOST_SETUP_ERROR = ''
+/** Modal ids that use the shared focus trap / Escape / backdrop close. */
+const MODAL_IDS = ['settings','jdtriage','addrole','ligoogle','rolepanel']
+/** Per-modal focus-trap release fns. */
+const modalRelease = Object.create(null)
+/** Per-modal backdrop-click teardown fns. */
+const modalBackdrop = Object.create(null)
+
+/** When a modal is open, mark every other body child inert so SR/tab can't reach the page behind. */
+function syncPageInert(openId){
+  for(const child of document.body.children){
+    if(!(child instanceof HTMLElement)) continue
+    if(openId && child.id === openId){ child.inert = false; continue }
+    child.inert = !!openId
+  }
+}
+function openModalId(){
+  return MODAL_IDS.find(id => { const el=$(id); return el && !el.classList.contains('hidden') }) || null
+}
+
+function trapModal(id, opener, focusEl){
+  modalRelease[id]?.()
+  modalBackdrop[id]?.()
+  const el=$(id); if(!el) return
+  el.classList.remove('hidden')
+  syncPageInert(id)
+  const onBackdrop = (e)=>{ if(e.target === el) closeModal(id) }
+  el.addEventListener('click', onBackdrop)
+  modalBackdrop[id] = ()=> el.removeEventListener('click', onBackdrop)
+  modalRelease[id]=createFocusTrap(el, opener||document.activeElement, focusEl||null)
+}
+function closeModal(id){
+  const el=$(id)
+  el?.classList.add('hidden')
+  modalBackdrop[id]?.(); modalBackdrop[id]=null
+  // Release inert before restoring focus — browsers ignore focus() into an inert subtree.
+  const release = modalRelease[id]
+  modalRelease[id]=null
+  syncPageInert(openModalId())
+  release?.()
+}
 
 function selfHostSetupError(error){
   const code = String(error?.code || '')
@@ -1583,10 +1623,11 @@ board.addEventListener('click',e=>{ if(suppressClick) return; if(e.target.closes
 
 // ---- role panel: JD auto-load → scan / tailor / cover / jobscan / download / apply ----
 let CURROLE=null, RPKIND='resume'
-$('rp_close').onclick=()=> $('rolepanel').classList.add('hidden')
+$('rp_close').onclick=()=> closeModal('rolepanel')
 async function openRole(id){
   if(APP_SECTION!=='board') showAppSection('board')
   if(NEWPANEL) return openRole2(id)
+  const opener = document.activeElement
   CURROLE=findRole(id); if(!CURROLE) return
   id=roleIdOf(CURROLE.id)
   logEvent('role_open', id)
@@ -1594,7 +1635,8 @@ async function openRole(id){
   $('rp_apply').style.display = CURROLE.url ? '' : 'none'; if(CURROLE.url) $('rp_apply').href=CURROLE.url
   $('rp_err').textContent=''; $('rp_matchout').classList.add('hidden'); $('rp_out').classList.add('hidden')
   $('rp_jd').value=''; $('rp_jobscan').value=''; $('rp_jdstate').textContent='· loading job description…'
-  $('rolepanel').classList.remove('hidden')
+  trapModal('rolepanel', opener, $('rp_jd'))
+
   loadSaved(id)
   if(CURROLE.jd){
     if(jdRejectReason(CURROLE.jd)){
@@ -3372,7 +3414,10 @@ function rp2RenderPick(){
   rp2GenNote()
   const rs=wrap.querySelector('#rp2_resplit'); if(rs) rs.onclick=()=>rp2Resplit()
   const os=wrap.querySelector('#rp2_opensettings'); if(os) os.onclick=()=>{
-    closeDrawer(); closeBuilder(); $('settings').classList.remove('hidden'); const ta=$('s_resume'); if(ta){ ta.focus(); ta.scrollIntoView({block:'center'}) }
+    closeDrawer(); closeBuilder()
+    const ta=$('s_resume')
+    trapModal('settings', os, ta)
+    ta?.scrollIntoView({block:'center'})
   }
   wrap.querySelectorAll('input[data-bid]').forEach(cb=>cb.onchange=()=>{ const bid=cb.dataset.bid
     if(cb.checked){ if(!RP2SEL.bullet_ids.includes(bid)) RP2SEL.bullet_ids.push(bid) }
@@ -3970,16 +4015,18 @@ function guessCompanyFromHost(url){
     return h.split('.')[0].replace(/-/g,' ')
   }catch(_e){ return 'Unknown' }
 }
+
 function openLiGoogleModal(){
   const { q }=liSearchBits()
   if($('li_query_preview')) $('li_query_preview').textContent='Google query: site:linkedin.com/jobs/view '+q
   if($('li_urls')) $('li_urls').value=''
   if($('li_jd_bulk')) $('li_jd_bulk').value=''
   if($('li_err')) $('li_err').textContent=''
-  $('ligoogle')?.classList.remove('hidden')
+  trapModal('ligoogle', $('li_google_btn'))
 }
 $('li_google_btn')&&($('li_google_btn').onclick=()=>openLiGoogleModal())
-$('li_close')&&($('li_close').onclick=()=>$('ligoogle').classList.add('hidden'))
+$('li_close')&&($('li_close').onclick=()=> closeModal('ligoogle'))
+
 $('li_open_google')&&($('li_open_google').onclick=()=>window.open(liGoogleUrl(),'_blank','noopener'))
 $('li_open_native')&&($('li_open_native').onclick=()=>window.open(liNativeUrl(),'_blank','noopener'))
 $('li_import')&&($('li_import').onclick=async()=>{
@@ -4019,7 +4066,7 @@ $('li_import')&&($('li_import').onclick=async()=>{
         }catch(_e){}
       }
     }
-    $('ligoogle').classList.add('hidden')
+    closeModal('ligoogle')
     await load()
     $('status').textContent = added
       ? `Added ${added} role${added>1?'s':''} from your links${skipped?` (${skipped} duplicates)`:''}${blocked?` · ${blocked} blocklisted`:''}. Edit titles/companies and paste JDs where needed.`
@@ -4031,9 +4078,10 @@ $('li_import')&&($('li_import').onclick=async()=>{
 $('addrolebtn').onclick=()=>{
   $('ar_company').value=''; $('ar_title').value=''; $('ar_url').value=''
   if($('ar_jd')) $('ar_jd').value=''
-  $('ar_err').textContent=''; $('addrole').classList.remove('hidden'); $('ar_company').focus()
+  $('ar_err').textContent=''
+  trapModal('addrole', $('addrolebtn'), $('ar_company'))
 }
-$('ar_close').onclick=()=> $('addrole').classList.add('hidden')
+$('ar_close').onclick=()=> closeModal('addrole')
 /** Shared Add-role insert — blocklist, dedupe, JD reject/format, ghost risk. */
 async function insertManualRoleOnBoard({ company, title, url, jd, stage }){
   if(!company||!title) return { error:'Company and job title are required.' }
@@ -4066,7 +4114,7 @@ $('ar_save').onclick=async()=>{
   try{
     const out=await insertManualRoleOnBoard({ company, title, url, jd, stage:'researched' })
     if(out.error){ $('ar_err').textContent=out.error; return }
-    $('addrole').classList.add('hidden')
+    closeModal('addrole')
     await load()
     if(out.data?.id) openRole(out.data.id)
   }catch(e){ $('ar_err').textContent=e.message||String(e) }
@@ -4095,16 +4143,17 @@ function jtSyncAddEnabled(){
 ;['jt_company','jt_title','jd'].forEach(id=>{
   const el=$(id); if(el) el.addEventListener('input', jtSyncAddEnabled)
 })
+
 $('jdtriagebtn').onclick=()=>{
   TRIAGE_LAST_MATCH=null
-  $('jdtriage').classList.remove('hidden')
   $('matchout').classList.add('hidden')
   $('resumeerr').textContent=''
   if($('jt_gaps')) $('jt_gaps').innerHTML=''
   jtSyncAddEnabled()
-  $('jd')?.focus()
+  trapModal('jdtriage', $('jdtriagebtn'), $('jd') || $('jt_company'))
 }
-$('jdtriageclose').onclick=()=> $('jdtriage').classList.add('hidden')
+$('jdtriageclose').onclick=()=> closeModal('jdtriage')
+
 $('matchbtn').onclick = async ()=>{
   $('resumeerr').textContent=''
   const jd=($('jd')?.value||'').trim()
@@ -4159,7 +4208,7 @@ $('jt_add').onclick=async()=>{
     }
     logEvent('jd_triage_add', role?.id, { scored: !!TRIAGE_LAST_MATCH })
     const scoredLabel = TRIAGE_LAST_MATCH?.match_score!=null ? ` · match ${TRIAGE_LAST_MATCH.match_score}%` : ''
-    $('jdtriage').classList.add('hidden')
+    closeModal('jdtriage')
     TRIAGE_LAST_MATCH=null
     await load()
     if(role?.id) openRole(role.id)
@@ -4176,6 +4225,7 @@ function paintSettingsSecrets(){
   if(ks) ks.innerHTML = painted.keysHtml
   if(hs) hs.innerHTML = painted.humanHtml
 }
+
 $('settingsbtn').onclick=()=>{
   FIND_PREFS = loadFindPrefs()
   $('s_titles').value=(PROFILE?.target_titles||[]).join(', ')
@@ -4218,9 +4268,10 @@ $('settingsbtn').onclick=()=>{
       ? 'Titles look Director/VP-weighted but Seniority is blank — Find treats blank as any level. Add “director, vp” here if you want that gate.'
       : (FIND_PREFS.max_age_days===0 ? 'Max age 0 = no age limit. Soft-hide only affects Sourced.' : '')
   }
-  $('settings').classList.remove('hidden')
+  trapModal('settings', $('settingsbtn'), $('s_titles'))
 }
-$('settingsclose').onclick=()=> $('settings').classList.add('hidden')
+
+$('settingsclose').onclick=()=> closeModal('settings')
 $('exp_json').onclick = async ()=>{
   const [{data:prof},{data:roles},{data:reports}] = await Promise.all([
     sb.from('mt_profiles').select('*').eq('owner',ME.id),
@@ -4496,7 +4547,7 @@ $('s_save').onclick = async ()=>{
   $('seterr').style.color='#1a7f37'
   $('seterr').textContent='Saved. Keys stay hidden — status above shows “key on file”. Find filters applied.'
   load()
-  setTimeout(()=>{ $('seterr').style.color=''; $('seterr').textContent=''; $('settings').classList.add('hidden') }, 1200)
+  setTimeout(()=>{ $('seterr').style.color=''; $('seterr').textContent=''; closeModal('settings') }, 1200)
 }
 
 // ==== Hybrid IA chrome: drawer verdict, tailor CTA, builder sync, Esc ====
@@ -4568,7 +4619,10 @@ document.addEventListener('keydown', e=>{
   if(!$('builderView')?.classList.contains('hidden')){ closeBuilder(); return }
   if(!$('drawer')?.classList.contains('hidden')){
     if(!$('rp2_jdwrap')?.classList.contains('hidden')) return // keep paste session
-    rp2FlushSel(); closeDrawer()
+    rp2FlushSel(); closeDrawer(); return
+  }
+  for(const id of MODAL_IDS){
+    if(!$(id)?.classList.contains('hidden')){ closeModal(id); return }
   }
 })
 $('dw_verdict')?.addEventListener('click', e=>{
